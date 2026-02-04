@@ -63,7 +63,7 @@ class ResetPasswordIn(BaseModel):
         if len(v.encode("utf-8")) > MAX_BCRYPT_BYTES:
             raise ValueError("Password too long (max 72 bytes for bcrypt).")
         return v
-
-
+    
+    
 class GenericMsgOut(BaseModel):
     detail: str

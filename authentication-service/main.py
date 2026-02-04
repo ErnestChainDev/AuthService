@@ -8,7 +8,7 @@ load_dotenv()
 app = FastAPI(title="Auth Service", version="1.0.0")
 
 db_url = build_mysql_url(
-    host=os.environ["MYSQLHOST"],
+    host=os.environ["MYSQL_PUBLIC_URL"],
     port=os.environ["MYSQLPORT"],
     user=os.environ["MYSQLUSER"],
     password=os.environ["MYSQLPASSWORD"],

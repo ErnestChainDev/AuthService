@@ -90,4 +90,4 @@ def can_request_new_otp(db: Session, user_id: int, cooldown_seconds: int = 60) -
     try:
         return (datetime.now(timezone.utc) - row.created_at).total_seconds() >= cooldown_seconds
     except Exception:
-        return True
+        return True 
