@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any
+import hashlib
 
 from jose import jwt, JWTError
 from passlib.context import CryptContext
@@ -30,7 +31,6 @@ def _password_bytes(password: str) -> bytes:
 
 
 def hash_password(password: str) -> str:
-    # 🚨 ABSOLUTE GUARD — bcrypt never sees invalid input
     _password_bytes(password)
     return pwd_context.hash(password)
 
@@ -65,8 +65,26 @@ def decode_token(token: str, secret: str, algorithm: str) -> Dict[str, Any]:
     except JWTError as e:
         raise ValueError("Invalid or expired token") from e
 
-def hash_otp(otp: str) -> str:
-    return pwd_context.hash(otp)
 
-def verify_otp(otp: str, otp_hash: str) -> bool:
-    return pwd_context.verify(otp, otp_hash)
+# -------------------------
+# Reset Link Token Helpers (NOT OTP)
+# -------------------------
+
+def hash_reset_token(token: str) -> str:
+    """
+    Deterministic hash for reset-link tokens.
+    Store this in DB instead of the raw token.
+    """
+    if not token:
+        raise ValueError("Reset token is required")
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def verify_reset_token(token: str, token_hash: str) -> bool:
+    """
+    Compare a raw token to a stored hash.
+    """
+    try:
+        return hash_reset_token(token) == token_hash
+    except Exception:
+        return False

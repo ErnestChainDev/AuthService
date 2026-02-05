@@ -54,7 +54,7 @@ class ForgotPasswordIn(BaseModel):
 
 class ResetPasswordIn(BaseModel):
     email: EmailStr
-    otp: str = Field(min_length=6, max_length=6)
+    token: str = Field(min_length=20)
     new_password: str = Field(min_length=8, max_length=128)
 
     @field_validator("new_password")

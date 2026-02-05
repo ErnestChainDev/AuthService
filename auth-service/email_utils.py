@@ -2,11 +2,7 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 
-def send_otp_email(to_email: str, otp: str) -> None:
-    """
-    SMTP sender. Use Railway Variables:
-    SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM
-    """
+def send_reset_link_email(to_email: str, reset_link: str) -> None:
     host = os.getenv("SMTP_HOST", "")
     port = int(os.getenv("SMTP_PORT", "587"))
     user = os.getenv("SMTP_USER", "")
@@ -16,14 +12,14 @@ def send_otp_email(to_email: str, otp: str) -> None:
     if not host or not user or not password or not from_email:
         raise RuntimeError("SMTP is not configured. Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/SMTP_FROM.")
 
-    subject = "Your Password Reset OTP"
+    subject = "Reset your password"
     body = (
-        f"Your OTP code is: {otp}\n\n"
-        "This code expires in 10 minutes.\n"
-        "If you did not request this, you can ignore this email."
+        "You requested a password reset.\n\n"
+        f"Click this link to set a new password:\n{reset_link}\n\n"
+        "If you didn't request this, you can ignore this email."
     )
 
-    msg = MIMEText(body)
+    msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = subject
     msg["From"] = from_email
     msg["To"] = to_email
