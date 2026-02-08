@@ -1,11 +1,11 @@
 import os
 import secrets
 from datetime import datetime, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 
 import httpx
 from authlib.jose import jwt as authlib_jwt
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
@@ -16,8 +16,8 @@ from shared.utils import (
     verify_password,
     create_access_token,
     decode_token,
-    hash_reset_token,      # ✅ NEW
-    verify_reset_token,    # ✅ NEW
+    hash_reset_token,
+    verify_reset_token,
 )
 
 from .schemas import (
@@ -29,13 +29,14 @@ from .schemas import (
     ForgotPasswordIn,
     ResetPasswordIn,
     GenericMsgOut,
+    AuthWithProfileOut,
 )
 
 from .crud import (
-    get_or_create_user_google,     # expects email + google_sub
+    get_or_create_user_google,
     get_user_by_email,
     create_user,
-    upsert_password_reset_token,   # ✅ token-based
+    upsert_password_reset_token,
     get_password_reset_row,
     mark_reset_used,
     update_user_password,
@@ -45,6 +46,13 @@ from .email_utils import send_reset_link_email
 
 load_dotenv()
 router = APIRouter()
+
+PROFILE_SERVICE_URL = os.getenv("PROFILE_SERVICE_URL", "").rstrip("/")
+SERVICE_TOKEN = os.getenv("SERVICE_TOKEN", "")
+
+STATE_COOKIE = "g_oauth_state"
+RETURN_COOKIE = "g_oauth_return"
+COOKIE_MAX_AGE = 10 * 60
 
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = os.environ["JWT_ALGORITHM"]
@@ -61,6 +69,8 @@ GOOGLE_OAUTH_SCOPES = os.getenv("GOOGLE_OAUTH_SCOPES", "openid email profile")
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+FRONTEND_OAUTH_SUCCESS_URL = os.getenv("FRONTEND_OAUTH_SUCCESS_URL", "http://localhost:5173/oauth/success")
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 
 
 def get_db_dep(SessionLocal):
@@ -75,26 +85,74 @@ def _require_google_env():
         )
 
 
+def _safe_return_to(value: str | None) -> str:
+    """
+    Prevent open-redirect attacks.
+    Only allow relative paths like '/dashboard' or '/profile-setup'.
+    """
+    if not value:
+        return "/dashboard"
+    value = value.strip()
+    if not value.startswith("/"):
+        return "/dashboard"
+    if value.startswith("//"):
+        return "/dashboard"
+    return value
+
+
 def build_router(SessionLocal):
     get_db = get_db_dep(SessionLocal)
+    async def _bootstrap_profile(user_id: int, email: str, full_name: str = "") -> dict:
+        if not PROFILE_SERVICE_URL:
+            raise HTTPException(status_code=500, detail="PROFILE_SERVICE_URL not configured")
+        if not SERVICE_TOKEN:
+            raise HTTPException(status_code=500, detail="SERVICE_TOKEN not configured")
+
+        url = f"{PROFILE_SERVICE_URL}/profile/internal/bootstrap"
+        params = {"user_id": user_id, "email": email, "full_name": full_name}
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.post(url, params=params, headers={"X-Service-Token": SERVICE_TOKEN})
+
+        if res.status_code != 200:
+            raise HTTPException(status_code=500, detail=f"Profile bootstrap failed: {res.text}")
+
+        return res.json()
 
     # -------------------------
     # Register
     # -------------------------
-    @router.post("/register", response_model=dict)
-    def register(payload: RegisterIn, db: Session = Depends(get_db)):
+    @router.post("/register", response_model=AuthWithProfileOut)
+    async def register(payload: RegisterIn, db: Session = Depends(get_db)):
         existing = get_user_by_email(db, payload.email)
         if existing:
             raise HTTPException(status_code=400, detail="Email already registered")
 
         u = create_user(db, payload.email, hash_password(payload.password))
-        return {"id": u.id, "email": u.email}
+
+        # ✅ Create token
+        token = create_access_token(
+            {"sub": str(u.id), "email": u.email},
+            secret=JWT_SECRET,
+            algorithm=JWT_ALGORITHM,
+            expires_minutes=ACCESS_TOKEN_EXPIRE_MINUTES,
+        )
+
+        # ✅ Ensure profile exists now
+        profile = await _bootstrap_profile(user_id=u.id, email=u.email)
+
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {"id": u.id, "email": u.email},
+            "profile": profile,
+        }
 
     # -------------------------
     # Login
     # -------------------------
-    @router.post("/login", response_model=TokenOut)
-    def login(payload: LoginIn, db: Session = Depends(get_db)):
+    @router.post("/login", response_model=AuthWithProfileOut)
+    async def login(payload: LoginIn, db: Session = Depends(get_db)):
         u = get_user_by_email(db, payload.email)
         if not u or not verify_password(payload.password, u.password_hash):
             raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -105,7 +163,16 @@ def build_router(SessionLocal):
             algorithm=JWT_ALGORITHM,
             expires_minutes=ACCESS_TOKEN_EXPIRE_MINUTES,
         )
-        return TokenOut(access_token=token)
+
+        # ✅ Ensure profile exists (idempotent)
+        profile = await _bootstrap_profile(user_id=u.id, email=u.email)
+
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {"id": u.id, "email": u.email},
+            "profile": profile,
+        }
 
     # -------------------------
     # Verify Token
@@ -114,7 +181,19 @@ def build_router(SessionLocal):
     def verify(payload: VerifyIn):
         try:
             data = decode_token(payload.token, JWT_SECRET, JWT_ALGORITHM)
-            return VerifyOut(sub=str(data.get("sub")), email=str(data.get("email")))
+
+            sub = data.get("sub")
+            email = data.get("email")
+
+            if not sub:
+                raise HTTPException(status_code=401, detail="Token missing sub")
+            if not email:
+                raise HTTPException(status_code=401, detail="Token missing email")
+
+            return VerifyOut(sub=str(sub), email=str(email))
+
+        except HTTPException:
+            raise
         except Exception:
             raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -125,16 +204,12 @@ def build_router(SessionLocal):
     def forgot_password(payload: ForgotPasswordIn, db: Session = Depends(get_db)):
         user = get_user_by_email(db, payload.email)
 
-        safe_response = GenericMsgOut(
-            detail="If the email exists, a password reset link has been sent."
-        )
-
+        safe_response = GenericMsgOut(detail="If the email exists, a password reset link has been sent.")
         if not user:
             return safe_response
 
         reset_token = secrets.token_urlsafe(32)
 
-        # ✅ store HASH of reset token (deterministic)
         upsert_password_reset_token(
             db,
             user_id=user.id,
@@ -143,15 +218,12 @@ def build_router(SessionLocal):
             expires_minutes=RESET_TOKEN_EXPIRE_MINUTES,
         )
 
-        reset_link = f"{FRONTEND_RESET_URL}?email={user.email}&token={reset_token}"
+        reset_link = f"{FRONTEND_RESET_URL}?email={quote(user.email)}&token={quote(reset_token)}"
 
         try:
             send_reset_link_email(user.email, reset_link)
         except Exception:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to send reset email. Check SMTP configuration.",
-            )
+            raise HTTPException(status_code=500,detail="Failed to send reset email. Check SMTP configuration.",)
 
         return safe_response
 
@@ -159,10 +231,10 @@ def build_router(SessionLocal):
     # Google OAuth (Login with Google)
     # =====================================================
     @router.get("/google/login")
-    def google_login():
+    def google_login(request: Request, return_to: str | None = None):
         _require_google_env()
 
-        state = secrets.token_urlsafe(16)
+        state = secrets.token_urlsafe(24)
 
         params = {
             "client_id": GOOGLE_CLIENT_ID,
@@ -174,11 +246,45 @@ def build_router(SessionLocal):
             "state": state,
         }
 
-        return RedirectResponse(url=f"{GOOGLE_AUTH_URL}?{urlencode(params)}")
+        redirect = RedirectResponse(
+            url=f"{GOOGLE_AUTH_URL}?{urlencode(params)}",
+            status_code=302,
+        )
 
-    @router.get("/google/callback", response_model=TokenOut)
-    async def google_callback(code: str, db: Session = Depends(get_db)):
+        redirect.set_cookie(
+            key=STATE_COOKIE,
+            value=state,
+            max_age=COOKIE_MAX_AGE,
+            httponly=True,
+            samesite="lax",
+            secure=COOKIE_SECURE,
+        )
+
+        # ✅ always store a safe return_to
+        safe_return = _safe_return_to(return_to)
+        redirect.set_cookie(
+            key=RETURN_COOKIE,
+            value=safe_return,
+            max_age=COOKIE_MAX_AGE,
+            httponly=True,
+            samesite="lax",
+            secure=COOKIE_SECURE,
+        )
+
+        return redirect
+
+    @router.get("/google/callback")
+    async def google_callback_redirect(
+        request: Request,
+        code: str,
+        state: str | None = None,
+        db: Session = Depends(get_db),  # ✅ typed correctly
+    ):
         _require_google_env()
+
+        expected_state = request.cookies.get(STATE_COOKIE)
+        if not expected_state or not state or state != expected_state:
+            raise HTTPException(status_code=400, detail="Invalid OAuth state.")
 
         async with httpx.AsyncClient(timeout=15) as client:
             token_res = await client.post(
@@ -219,19 +325,35 @@ def build_router(SessionLocal):
 
         email = claims.get("email")
         google_sub = claims.get("sub")
-
         if not email or not google_sub:
             raise HTTPException(status_code=401, detail="Missing email/sub from Google token.")
 
         u = get_or_create_user_google(db, email=email, google_sub=str(google_sub))
+        _ = await _bootstrap_profile(user_id=u.id, email=u.email)
 
-        token = create_access_token(
+        access_token = create_access_token(
             {"sub": str(u.id), "email": u.email},
             secret=JWT_SECRET,
             algorithm=JWT_ALGORITHM,
             expires_minutes=ACCESS_TOKEN_EXPIRE_MINUTES,
         )
-        return TokenOut(access_token=token)
+
+        return_to_cookie = request.cookies.get(RETURN_COOKIE)
+        return_to = _safe_return_to(return_to_cookie)
+
+        # ✅ safe URL params
+        redirect_url = (
+            f"{FRONTEND_OAUTH_SUCCESS_URL}"
+            f"?token={quote(access_token)}"
+            f"&return_to={quote(return_to)}"
+        )
+
+        redirect = RedirectResponse(url=redirect_url, status_code=302)
+
+        redirect.delete_cookie(STATE_COOKIE)
+        redirect.delete_cookie(RETURN_COOKIE)
+
+        return redirect
 
     # =====================================================
     # Reset Password (Token + Change Password) - TOKEN
@@ -250,7 +372,6 @@ def build_router(SessionLocal):
         if row.expires_at is None or row.expires_at.replace(tzinfo=timezone.utc) <= now:
             return GenericMsgOut(detail="Invalid or expired reset link.")
 
-        # ✅ compare using helper
         if not verify_reset_token(payload.token, row.token_hash):
             return GenericMsgOut(detail="Invalid or expired reset link.")
 

@@ -67,3 +67,24 @@ class ResetPasswordIn(BaseModel):
     
 class GenericMsgOut(BaseModel):
     detail: str
+
+class UserOut(BaseModel):
+    id: int
+    email: str
+
+class ProfileOut(BaseModel):
+    user_id: int
+    full_name: str
+    year_level: str
+    bio: str
+    interests: str
+    career_goals: str
+    preferred_program: str
+    skills: str
+    notes: str
+
+class AuthWithProfileOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
+    profile: ProfileOut
