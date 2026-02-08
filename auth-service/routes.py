@@ -23,7 +23,6 @@ from shared.utils import (
 from .schemas import (
     RegisterIn,
     LoginIn,
-    TokenOut,
     VerifyIn,
     VerifyOut,
     ForgotPasswordIn,
@@ -47,15 +46,10 @@ from .email_utils import send_reset_link_email
 load_dotenv()
 router = APIRouter()
 
-PROFILE_SERVICE_URL = os.getenv("PROFILE_SERVICE_URL", "").rstrip("/")
-SERVICE_TOKEN = os.getenv("SERVICE_TOKEN", "")
-
 STATE_COOKIE = "g_oauth_state"
 RETURN_COOKIE = "g_oauth_return"
 COOKIE_MAX_AGE = 10 * 60
 
-JWT_SECRET = os.environ["JWT_SECRET"]
-JWT_ALGORITHM = os.environ["JWT_ALGORITHM"]
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ["ACCESS_TOKEN_EXPIRE_MINUTES"])
 RESET_TOKEN_EXPIRE_MINUTES = int(os.getenv("RESET_TOKEN_EXPIRE_MINUTES", "15"))
 FRONTEND_RESET_URL = os.getenv("FRONTEND_RESET_URL", "http://localhost:5173/reset-password")
@@ -102,12 +96,19 @@ def _safe_return_to(value: str | None) -> str:
 
 def build_router(SessionLocal):
     get_db = get_db_dep(SessionLocal)
-    async def _bootstrap_profile(user_id: int, email: str, full_name: str = "") -> dict:
-        if not PROFILE_SERVICE_URL:
-            raise HTTPException(status_code=500, detail="PROFILE_SERVICE_URL not configured")
-        if not SERVICE_TOKEN:
-            raise HTTPException(status_code=500, detail="SERVICE_TOKEN not configured")
+    PROFILE_SERVICE_URL = os.getenv("PROFILE_SERVICE_URL", "").rstrip("/")
+    JWT_SECRET = os.environ["JWT_SECRET"]
+    JWT_ALGORITHM = os.environ["JWT_ALGORITHM"]
+    SERVICE_TOKEN = os.getenv("SERVICE_TOKEN", "")
+    
+    if not JWT_SECRET:
+        raise RuntimeError("JWT_SECRET not configured")
+    if not PROFILE_SERVICE_URL:
+        raise RuntimeError("PROFILE_SERVICE_URL not configured")
+    if not SERVICE_TOKEN:
+        raise RuntimeError("SERVICE_TOKEN not configured")
 
+    async def _bootstrap_profile(user_id: int, email: str, full_name: str = "") -> dict:
         url = f"{PROFILE_SERVICE_URL}/profile/internal/bootstrap"
         params = {"user_id": user_id, "email": email, "full_name": full_name}
 
@@ -115,7 +116,10 @@ def build_router(SessionLocal):
             res = await client.post(url, params=params, headers={"X-Service-Token": SERVICE_TOKEN})
 
         if res.status_code != 200:
-            raise HTTPException(status_code=500, detail=f"Profile bootstrap failed: {res.text}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Profile bootstrap failed ({res.status_code}): {res.text}",
+            )
 
         return res.json()
 
@@ -325,14 +329,18 @@ def build_router(SessionLocal):
 
         email = claims.get("email")
         google_sub = claims.get("sub")
+        full_name = (claims.get("name") or "").strip()
         if not email or not google_sub:
             raise HTTPException(status_code=401, detail="Missing email/sub from Google token.")
 
-        u = get_or_create_user_google(db, email=email, google_sub=str(google_sub))
-        _ = await _bootstrap_profile(user_id=u.id, email=u.email)
+        # ✅ FIX: this line was broken in your code
+        user = get_or_create_user_google(db, email=str(email), google_sub=str(google_sub))
+
+        # ✅ Ensure profile exists and store name if available
+        await _bootstrap_profile(user_id=user.id, email=user.email, full_name=full_name)
 
         access_token = create_access_token(
-            {"sub": str(u.id), "email": u.email},
+            {"sub": str(user.id), "email": user.email},
             secret=JWT_SECRET,
             algorithm=JWT_ALGORITHM,
             expires_minutes=ACCESS_TOKEN_EXPIRE_MINUTES,

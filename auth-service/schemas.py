@@ -74,14 +74,14 @@ class UserOut(BaseModel):
 
 class ProfileOut(BaseModel):
     user_id: int
-    full_name: str
-    year_level: str
-    bio: str
-    interests: str
-    career_goals: str
-    preferred_program: str
-    skills: str
-    notes: str
+    full_name: str = ""
+    year_level: str = ""
+    bio: str = ""
+    interests: str = ""
+    career_goals: str = ""
+    preferred_program: str = ""
+    skills: str = ""
+    notes: str = ""
 
 class AuthWithProfileOut(BaseModel):
     access_token: str
