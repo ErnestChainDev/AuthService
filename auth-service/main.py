@@ -1,7 +1,6 @@
 import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from shared.database import build_mysql_url, make_engine, make_session_factory, Base
 from .routes import build_router
@@ -9,17 +8,6 @@ from .routes import build_router
 load_dotenv()
 
 app = FastAPI(title="Auth Service", version="1.0.0")
-
-raw = os.getenv("CORS_ORIGINS", "*")
-origins = [o.strip() for o in raw.split(",") if o.strip()]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"] if origins == ["*"] else origins,
-    allow_credentials=True,
-    allow_methods=["*"],  # includes OPTIONS
-    allow_headers=["*"],
-)
 
 db_url = build_mysql_url(
     host=os.environ["MYSQLHOST"],
