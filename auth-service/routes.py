@@ -238,10 +238,10 @@ def build_router(SessionLocal):
         return safe_response
     
 
-@router.get("/debug/smtp-test")
-def smtp_test():
-    send_reset_link_email("sorsulearnersportal@gmail.com", "http://localhost:5173/reset-password")
-    return {"ok": True}
+    @router.get("/debug/smtp-test")
+    def smtp_test():
+        send_reset_link_email("sorsulearnersportal@gmail.com", "http://localhost:5173/reset-password")
+        return {"ok": True}
 
     # =====================================================
     # Google OAuth (Login with Google)
