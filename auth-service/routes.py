@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
+from typing import Literal
 
 from shared.database import db_dependency
 from shared.utils import (
@@ -65,6 +66,13 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 FRONTEND_OAUTH_SUCCESS_URL = os.getenv("FRONTEND_OAUTH_SUCCESS_URL", "http://localhost:5173/oauth/success")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+COOKIE_SAMESITE: Literal["lax", "strict", "none"] = (
+    "none"
+    if os.getenv("COOKIE_SAMESITE", "lax").lower() == "none"
+    else "strict"
+    if os.getenv("COOKIE_SAMESITE", "lax").lower() == "strict"
+    else "lax"
+)
 
 
 def get_db_dep(SessionLocal):
@@ -272,8 +280,9 @@ def build_router(SessionLocal):
             value=state,
             max_age=COOKIE_MAX_AGE,
             httponly=True,
-            samesite="lax",
+            samesite=COOKIE_SAMESITE,
             secure=COOKIE_SECURE,
+            path="/",
         )
 
         # ✅ always store a safe return_to
@@ -283,8 +292,9 @@ def build_router(SessionLocal):
             value=safe_return,
             max_age=COOKIE_MAX_AGE,
             httponly=True,
-            samesite="lax",
+            samesite=COOKIE_SAMESITE,
             secure=COOKIE_SECURE,
+            path="/",
         )
 
         return redirect
@@ -370,8 +380,8 @@ def build_router(SessionLocal):
 
         redirect = RedirectResponse(url=redirect_url, status_code=302)
 
-        redirect.delete_cookie(STATE_COOKIE)
-        redirect.delete_cookie(RETURN_COOKIE)
+        redirect.delete_cookie(STATE_COOKIE, path="/")
+        redirect.delete_cookie(RETURN_COOKIE, path="/")
 
         return redirect
 
