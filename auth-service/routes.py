@@ -93,6 +93,11 @@ def _safe_return_to(value: str | None) -> str:
         return "/dashboard"
     return value
 
+def _as_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 
 def build_router(SessionLocal):
     get_db = get_db_dep(SessionLocal)
@@ -376,19 +381,20 @@ def build_router(SessionLocal):
         if not row or row.used_at is not None:
             return GenericMsgOut(detail="Invalid or expired reset link.")
 
+        if not row.expires_at:
+            return GenericMsgOut(detail="Invalid or expired reset link.")
+
         now = datetime.now(timezone.utc)
-        if row.expires_at is None or row.expires_at.replace(tzinfo=timezone.utc) <= now:
+        if _as_utc(row.expires_at) <= now:
+            return GenericMsgOut(detail="Invalid or expired reset link.")
+
+        if not row.token_hash:
             return GenericMsgOut(detail="Invalid or expired reset link.")
 
         if not verify_reset_token(payload.token, row.token_hash):
             return GenericMsgOut(detail="Invalid or expired reset link.")
 
-        update_user_password(
-            db,
-            user=user,
-            new_password_hash=hash_password(payload.new_password),
-        )
-
+        update_user_password(db, user=user, new_password_hash=hash_password(payload.new_password))
         mark_reset_used(db, row)
 
         return GenericMsgOut(detail="Password updated successfully.")
