@@ -1,6 +1,7 @@
 import os
 import smtplib
 from email.mime.text import MIMEText
+from email.utils import formataddr
 
 def send_reset_link_email(to_email: str, reset_link: str) -> None:
     host = os.getenv("SMTP_HOST", "")
@@ -21,7 +22,7 @@ def send_reset_link_email(to_email: str, reset_link: str) -> None:
 
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = subject
-    msg["From"] = from_email
+    msg["From"] = formataddr((os.getenv("SMTP_FROM_NAME", "Learners Portal"), from_email))
     msg["To"] = to_email
 
     with smtplib.SMTP(host, port) as server:
