@@ -25,7 +25,10 @@ def send_reset_link_email(to_email: str, reset_link: str) -> None:
     msg["From"] = formataddr((os.getenv("SMTP_FROM_NAME", "Learners Portal"), from_email))
     msg["To"] = to_email
 
-    with smtplib.SMTP(host, port) as server:
+    with smtplib.SMTP(host, port, timeout=15) as server:
+        server.ehlo()
         server.starttls()
+        server.ehlo()
+        
         server.login(user, password)
         server.sendmail(from_email, [to_email], msg.as_string())

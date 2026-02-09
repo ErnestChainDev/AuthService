@@ -231,10 +231,17 @@ def build_router(SessionLocal):
 
         try:
             send_reset_link_email(user.email, reset_link)
-        except Exception:
+        except Exception as e:
+            print("SMTP ERROR:", repr(e))
             raise HTTPException(status_code=500,detail="Failed to send reset email. Check SMTP configuration.",)
 
         return safe_response
+    
+
+@router.get("/debug/smtp-test")
+def smtp_test():
+    send_reset_link_email("sorsulearnersportal@gmail.com", "http://localhost:5173/reset-password")
+    return {"ok": True}
 
     # =====================================================
     # Google OAuth (Login with Google)
