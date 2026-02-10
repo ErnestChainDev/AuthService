@@ -6,7 +6,7 @@ from urllib.parse import urlencode, quote
 import httpx
 from authlib.jose import jwt as authlib_jwt
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, HTMLResponse
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 from typing import Literal
@@ -73,6 +73,7 @@ COOKIE_SAMESITE: Literal["lax", "strict", "none"] = (
     if os.getenv("COOKIE_SAMESITE", "lax").lower() == "strict"
     else "lax"
 )
+MODE_COOKIE = "g_oauth_mode"
 
 
 def get_db_dep(SessionLocal):
@@ -255,14 +256,18 @@ def build_router(SessionLocal):
     # Google OAuth (Login with Google)
     # =====================================================
     @router.get("/google/login")
-    def google_login(request: Request, return_to: str | None = None):
+    def google_login(
+        request: Request,
+        return_to: str | None = None,
+        mode: str | None = None,   # ✅ add this
+    ):
         _require_google_env()
 
         state = secrets.token_urlsafe(24)
 
         params = {
             "client_id": GOOGLE_CLIENT_ID,
-            "redirect_uri": GOOGLE_REDIRECT_URI,
+            "redirect_uri": GOOGLE_REDIRECT_URI,  # keep clean
             "response_type": "code",
             "scope": GOOGLE_OAUTH_SCOPES,
             "access_type": "offline",
@@ -285,7 +290,6 @@ def build_router(SessionLocal):
             path="/",
         )
 
-        # ✅ always store a safe return_to
         safe_return = _safe_return_to(return_to)
         redirect.set_cookie(
             key=RETURN_COOKIE,
@@ -297,14 +301,27 @@ def build_router(SessionLocal):
             path="/",
         )
 
+        # ✅ store popup mode (not httponly so ok either way, but can be httponly too)
+        popup_mode = "popup" if mode == "popup" else "redirect"
+        redirect.set_cookie(
+            key=MODE_COOKIE,
+            value=popup_mode,
+            max_age=COOKIE_MAX_AGE,
+            httponly=True,                 # ✅ keep it consistent + safer
+            samesite=COOKIE_SAMESITE,
+            secure=COOKIE_SECURE,
+            path="/",
+        )
+
         return redirect
+
 
     @router.get("/google/callback")
     async def google_callback_redirect(
         request: Request,
         code: str,
         state: str | None = None,
-        db: Session = Depends(get_db),  # ✅ typed correctly
+        db: Session = Depends(get_db),
     ):
         _require_google_env()
 
@@ -312,6 +329,14 @@ def build_router(SessionLocal):
         if not expected_state or not state or state != expected_state:
             raise HTTPException(status_code=400, detail="Invalid OAuth state.")
 
+        # read cookies
+        return_to_cookie = request.cookies.get(RETURN_COOKIE)
+        return_to = _safe_return_to(return_to_cookie)
+
+        mode_cookie = (request.cookies.get(MODE_COOKIE) or "").strip().lower()
+        is_popup = mode_cookie == "popup"
+
+        # exchange code -> tokens
         async with httpx.AsyncClient(timeout=15) as client:
             token_res = await client.post(
                 GOOGLE_TOKEN_URL,
@@ -333,9 +358,11 @@ def build_router(SessionLocal):
         if not id_token:
             raise HTTPException(status_code=401, detail="Google did not return id_token.")
 
+        # fetch jwks
         async with httpx.AsyncClient(timeout=15) as client:
             jwks = (await client.get(GOOGLE_JWKS_URL)).json()
 
+        # verify id_token
         try:
             claims = authlib_jwt.decode(
                 id_token,
@@ -355,12 +382,13 @@ def build_router(SessionLocal):
         if not email or not google_sub:
             raise HTTPException(status_code=401, detail="Missing email/sub from Google token.")
 
-        # ✅ FIX: this line was broken in your code
+        # upsert user
         user = get_or_create_user_google(db, email=str(email), google_sub=str(google_sub))
 
-        # ✅ Ensure profile exists and store name if available
+        # ensure profile
         await _bootstrap_profile(user_id=user.id, email=user.email, full_name=full_name)
 
+        # app jwt token
         access_token = create_access_token(
             {"sub": str(user.id), "email": user.email},
             secret=JWT_SECRET,
@@ -368,21 +396,55 @@ def build_router(SessionLocal):
             expires_minutes=ACCESS_TOKEN_EXPIRE_MINUTES,
         )
 
-        return_to_cookie = request.cookies.get(RETURN_COOKIE)
-        return_to = _safe_return_to(return_to_cookie)
+        # -------- popup mode --------
+        if is_popup:
+            # IMPORTANT: set your frontend origin here (strict)
+            frontend_origin = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 
-        # ✅ safe URL params
+            html = f"""
+    <!doctype html>
+    <html>
+    <head><meta charset="utf-8" /><title>OAuth Success</title></head>
+    <body>
+        <script>
+        (function() {{
+            var payload = {{
+            token: {access_token!r},
+            return_to: {return_to!r}
+            }};
+            try {{
+            if (window.opener) {{
+                window.opener.postMessage(payload, {frontend_origin!r});
+            }}
+            }} catch (e) {{}}
+            window.close();
+        }})();
+        </script>
+        <p>You may close this window.</p>
+    </body>
+    </html>
+    """
+            resp = HTMLResponse(content=html, status_code=200)
+
+            # clear cookies
+            resp.delete_cookie(STATE_COOKIE, path="/")
+            resp.delete_cookie(RETURN_COOKIE, path="/")
+            resp.delete_cookie(MODE_COOKIE, path="/")
+
+            return resp
+
+        # -------- redirect mode --------
         redirect_url = (
             f"{FRONTEND_OAUTH_SUCCESS_URL}"
-            f"#token={quote(access_token)}"
+            f"?token={quote(access_token)}"
             f"&return_to={quote(return_to)}"
         )
-        redirect = RedirectResponse(url=redirect_url, status_code=302)
 
-        redirect.delete_cookie(STATE_COOKIE, path="/")
-        redirect.delete_cookie(RETURN_COOKIE, path="/")
-
-        return redirect
+        resp = RedirectResponse(url=redirect_url, status_code=302)
+        resp.delete_cookie(STATE_COOKIE, path="/")
+        resp.delete_cookie(RETURN_COOKIE, path="/")
+        resp.delete_cookie(MODE_COOKIE, path="/")
+        return resp
 
     # =====================================================
     # Reset Password (Token + Change Password) - TOKEN
