@@ -374,10 +374,9 @@ def build_router(SessionLocal):
         # ✅ safe URL params
         redirect_url = (
             f"{FRONTEND_OAUTH_SUCCESS_URL}"
-            f"?token={quote(access_token)}"
+            f"#token={quote(access_token)}"
             f"&return_to={quote(return_to)}"
         )
-
         redirect = RedirectResponse(url=redirect_url, status_code=302)
 
         redirect.delete_cookie(STATE_COOKIE, path="/")
