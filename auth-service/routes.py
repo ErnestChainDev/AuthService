@@ -399,7 +399,7 @@ def build_router(SessionLocal):
         # -------- popup mode --------
         if is_popup:
             # IMPORTANT: set your frontend origin here (strict)
-            frontend_origin = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+            frontend_origin = (os.getenv("FRONTEND_ORIGIN", "http://localhost:5173") or "").rstrip("/")
 
             html = f"""
     <!doctype html>
