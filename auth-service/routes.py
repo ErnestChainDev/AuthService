@@ -91,15 +91,15 @@ def _require_google_env():
 def _safe_return_to(value: str | None) -> str:
     """
     Prevent open-redirect attacks.
-    Only allow relative paths like '/dashboard' or '/profile-setup'.
+    Only allow relative paths like '/home' or '/profile-setup'.
     """
     if not value:
-        return "/dashboard"
+        return "/home"
     value = value.strip()
     if not value.startswith("/"):
-        return "/dashboard"
+        return "/home"
     if value.startswith("//"):
-        return "/dashboard"
+        return "/home"
     return value
 
 def _as_utc(dt: datetime) -> datetime:
